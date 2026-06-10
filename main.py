@@ -12,6 +12,7 @@ TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 @app.route('/webhook/hotmart', methods=['POST'])
 def hotmart_webhook():
     data = request.json
+    conta = request.args.get('conta', 'Hotmart')
 
     if not data:
         return jsonify({'erro': 'Sem dados recebidos'}), 400
@@ -39,7 +40,8 @@ def hotmart_webhook():
         agora = datetime.now().strftime('%d/%m/%Y às %H:%M')
 
         mensagem = (
-            f"🎉 *NOVA VENDA NA HOTMART!*\n\n"
+            f"🎉 *NOVA VENDA NA HOTMART!*\n"
+            f"🏪 *Conta:* {conta}\n\n"
             f"📦 *Produto:* {nome_produto}\n"
             f"💰 *Valor total:* R$ {valor_total:.2f}\n"
             f"{linha_comissao}"
