@@ -28,17 +28,21 @@ def hotmart_webhook():
         comprador = purchase_data.get('buyer', {})
 
         nome_produto = produto.get('name', 'Produto')
-        valor = compra.get('price', {}).get('value', 0)
+        valor_total = compra.get('price', {}).get('value', 0)
         transacao = compra.get('transaction', 'N/A')
         nome_comprador = comprador.get('name', 'N/A')
         email_comprador = comprador.get('email', 'N/A')
+
+        comissao = compra.get('commission', {}).get('value', None)
+        linha_comissao = f"💵 *Minha parte:* R$ {comissao:.2f}\n" if comissao else ""
 
         agora = datetime.now().strftime('%d/%m/%Y às %H:%M')
 
         mensagem = (
             f"🎉 *NOVA VENDA NA HOTMART!*\n\n"
             f"📦 *Produto:* {nome_produto}\n"
-            f"💰 *Valor:* R$ {valor:.2f}\n"
+            f"💰 *Valor total:* R$ {valor_total:.2f}\n"
+            f"{linha_comissao}"
             f"👤 *Comprador:* {nome_comprador}\n"
             f"📧 *Email:* {email_comprador}\n"
             f"🔑 *Transação:* {transacao}\n"
