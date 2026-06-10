@@ -2,11 +2,26 @@ from flask import Flask, request, jsonify
 import requests
 import os
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 app = Flask(__name__)
 
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
+TELEGRAM_CHAT_ID_PROBLEMAS = os.environ.get('TELEGRAM_CHAT_ID_PROBLEMAS')
+
+mensagens_enviadas = {}
+
+EVENTOS_APROVACAO = ['PURCHASE_APPROVED', 'PURCHASE_COMPLETE']
+EVENTOS_CANCELAMENTO = ['PURCHASE_CANCELED', 'PURCHASE_REFUNDED', 'PURCHASE_CHARGEBACK', 'PURCHASE_PROTEST', 'PURCHASE_EXPIRED']
+
+LABELS_EVENTO = {
+    'PURCHASE_CANCELED':  ('❌', 'VENDA CANCELADA'),
+    'PURCHASE_REFUNDED':  ('↩️', 'VENDA REEMBOLSADA'),
+    'PURCHASE_CHARGEBACK': ('🚨', 'CHARGEBACK'),
+    'PURCHASE_PROTEST':   ('⚠️', 'VENDA PROTESTADA'),
+    'PURCHASE_EXPIRED':   ('⏰', 'PAGAMENTO EXPIRADO'),
+}
 
 
 @app.route('/webhook/hotmart', methods=['POST'])
@@ -19,7 +34,7 @@ def hotmart_webhook():
 
     evento = data.get('event', '')
 
-    if evento not in ['PURCHASE_APPROVED', 'PURCHASE_COMPLETE']:
+    if evento not in EVENTOS_APROVACAO + EVENTOS_CANCELAMENTO:
         return jsonify({'status': 'ignorado', 'evento': evento}), 200
 
     try:
@@ -37,34 +52,68 @@ def hotmart_webhook():
         comissao = compra.get('commission', {}).get('value', None)
         linha_comissao = f"💵 *Minha parte:* R$ {comissao:.2f}\n" if comissao else ""
 
-        agora = datetime.now().strftime('%d/%m/%Y às %H:%M')
+        agora = datetime.now(ZoneInfo('America/Sao_Paulo')).strftime('%d/%m/%Y às %H:%M')
 
-        mensagem = (
-            f"🎉 *NOVA VENDA NA HOTMART!*\n"
-            f"🏪 *Conta:* {conta}\n\n"
-            f"📦 *Produto:* {nome_produto}\n"
-            f"💰 *Valor total:* R$ {valor_total:.2f}\n"
-            f"{linha_comissao}"
-            f"👤 *Comprador:* {nome_comprador}\n"
-            f"📧 *Email:* {email_comprador}\n"
-            f"🔑 *Transação:* {transacao}\n"
-            f"🕐 *Data:* {agora}"
-        )
+        if evento in EVENTOS_APROVACAO:
+            mensagem = (
+                f"🎉 *NOVA VENDA NA HOTMART!*\n"
+                f"🏪 *Conta:* {conta}\n\n"
+                f"📦 *Produto:* {nome_produto}\n"
+                f"💰 *Valor total:* R$ {valor_total:.2f}\n"
+                f"{linha_comissao}"
+                f"👤 *Comprador:* {nome_comprador}\n"
+                f"📧 *Email:* {email_comprador}\n"
+                f"🔑 *Transação:* {transacao}\n"
+                f"🕐 *Data:* {agora}"
+            )
+            message_id = enviar_telegram(mensagem, TELEGRAM_CHAT_ID)
+            if message_id:
+                mensagens_enviadas[transacao] = message_id
 
-        enviar_telegram(mensagem)
+        elif evento in EVENTOS_CANCELAMENTO:
+            emoji, label = LABELS_EVENTO.get(evento, ('❌', 'VENDA CANCELADA'))
+
+            if transacao in mensagens_enviadas:
+                deletar_mensagem(mensagens_enviadas.pop(transacao))
+
+            mensagem = (
+                f"{emoji} *{label}*\n"
+                f"🏪 *Conta:* {conta}\n\n"
+                f"📦 *Produto:* {nome_produto}\n"
+                f"💰 *Valor:* R$ {valor_total:.2f}\n"
+                f"👤 *Comprador:* {nome_comprador}\n"
+                f"📧 *Email:* {email_comprador}\n"
+                f"🔑 *Transação:* {transacao}\n"
+                f"🕐 *Data:* {agora}"
+            )
+            enviar_telegram(mensagem, TELEGRAM_CHAT_ID_PROBLEMAS)
+
         return jsonify({'status': 'ok'}), 200
 
     except Exception as e:
-        print(f"Erro ao processar venda: {e}")
+        print(f"Erro ao processar evento: {e}")
         return jsonify({'erro': str(e)}), 500
 
 
-def enviar_telegram(mensagem):
+def enviar_telegram(mensagem, chat_id):
     url = f'https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage'
     payload = {
-        'chat_id': TELEGRAM_CHAT_ID,
+        'chat_id': chat_id,
         'text': mensagem,
         'parse_mode': 'Markdown'
+    }
+    response = requests.post(url, json=payload, timeout=10)
+    data = response.json()
+    if data.get('ok'):
+        return data['result']['message_id']
+    return None
+
+
+def deletar_mensagem(message_id):
+    url = f'https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteMessage'
+    payload = {
+        'chat_id': TELEGRAM_CHAT_ID,
+        'message_id': message_id
     }
     requests.post(url, json=payload, timeout=10)
 
