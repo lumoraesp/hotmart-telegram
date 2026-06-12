@@ -4,6 +4,18 @@ import os
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+
+def converter_para_brl(valor, moeda):
+    if not moeda or moeda.upper() == 'BRL':
+        return valor, None
+    try:
+        par = f"{moeda.upper()}-BRL"
+        resp = requests.get(f"https://economia.awesomeapi.com.br/json/last/{par}", timeout=5)
+        cotacao = float(resp.json()[f"{moeda.upper()}BRL"]['bid'])
+        return round(valor * cotacao, 2), cotacao
+    except Exception:
+        return None, None
+
 app = Flask(__name__)
 
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
@@ -44,10 +56,22 @@ def hotmart_webhook():
         comprador = purchase_data.get('buyer', {})
 
         nome_produto = produto.get('name', 'Produto')
-        valor_total = compra.get('price', {}).get('value', 0)
+        preco = compra.get('price', {})
+        valor_total = preco.get('value', 0)
+        moeda = preco.get('currency_value', 'BRL')
         transacao = compra.get('transaction', 'N/A')
         nome_comprador = comprador.get('name', 'N/A')
         email_comprador = comprador.get('email', 'N/A')
+
+        valor_brl, cotacao = converter_para_brl(valor_total, moeda)
+
+        if moeda.upper() != 'BRL':
+            if valor_brl:
+                linha_valor = f"💰 *Valor:* {moeda} {valor_total:.2f} ≈ R$ {valor_brl:.2f}\n"
+            else:
+                linha_valor = f"💰 *Valor:* {moeda} {valor_total:.2f}\n"
+        else:
+            linha_valor = f"💰 *Valor:* R$ {valor_total:.2f}\n"
 
         comissao = compra.get('commission', {}).get('value', None)
         linha_comissao = f"💵 *Minha parte:* R$ {comissao:.2f}\n" if comissao else ""
@@ -59,7 +83,7 @@ def hotmart_webhook():
                 f"🎉 *NOVA VENDA NA HOTMART!*\n"
                 f"🏪 *Conta:* {conta}\n\n"
                 f"📦 *Produto:* {nome_produto}\n"
-                f"💰 *Valor total:* R$ {valor_total:.2f}\n"
+                f"{linha_valor}"
                 f"{linha_comissao}"
                 f"👤 *Comprador:* {nome_comprador}\n"
                 f"📧 *Email:* {email_comprador}\n"
@@ -80,7 +104,7 @@ def hotmart_webhook():
                 f"{emoji} *{label}*\n"
                 f"🏪 *Conta:* {conta}\n\n"
                 f"📦 *Produto:* {nome_produto}\n"
-                f"💰 *Valor:* R$ {valor_total:.2f}\n"
+                f"{linha_valor}"
                 f"👤 *Comprador:* {nome_comprador}\n"
                 f"📧 *Email:* {email_comprador}\n"
                 f"🔑 *Transação:* {transacao}\n"
