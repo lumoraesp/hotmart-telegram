@@ -167,6 +167,16 @@ def redis_comando(*comando):
         return None
 
 
+@app.route('/webhook/lia', methods=['GET', 'POST'])
+def lia_webhook():
+    # Temporário: só registra o payload no log da Vercel para descobrir o formato da Lia.
+    # Depois de ver um evento real, trocar por formatação + envio ao Telegram e remover este print.
+    corpo = request.get_data(as_text=True)
+    print(f"LIA_PAYLOAD method={request.method} args={dict(request.args)} "
+          f"content_type={request.content_type} body={corpo[:8000]}")
+    return jsonify({'status': 'ok'}), 200
+
+
 @app.route('/', methods=['GET'])
 def home():
     return jsonify({'status': 'Servidor rodando!'}), 200
