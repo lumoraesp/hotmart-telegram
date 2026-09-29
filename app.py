@@ -22,6 +22,7 @@ app = Flask(__name__)
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 TELEGRAM_CHAT_ID_PROBLEMAS = os.environ.get('TELEGRAM_CHAT_ID_PROBLEMAS')
+TELEGRAM_CHAT_ID_LIA = os.environ.get('TELEGRAM_CHAT_ID_LIA')
 
 # Redis (Upstash) guarda o message_id de cada venda para apagar a mensagem se ela for cancelada.
 # Na Vercel cada requisição pode rodar num processo novo, então memória local não serve.
@@ -169,12 +170,37 @@ def redis_comando(*comando):
 
 @app.route('/webhook/lia', methods=['GET', 'POST'])
 def lia_webhook():
-    # Temporário: só registra o payload no log da Vercel para descobrir o formato da Lia.
-    # Depois de ver um evento real, trocar por formatação + envio ao Telegram e remover este print.
+    # Provisório: a Lia não documenta o formato do webhook. O payload vai para o log da Vercel
+    # e o grupo recebe os campos reconhecíveis. Depois do primeiro evento real, trocar por
+    # formatação específica e remover o print (tem dado pessoal do aluno).
     corpo = request.get_data(as_text=True)
     print(f"LIA_PAYLOAD method={request.method} args={dict(request.args)} "
           f"content_type={request.content_type} body={corpo[:8000]}")
+
+    data = request.get_json(silent=True)
+    if not isinstance(data, (dict, list)):
+        return jsonify({'status': 'ignorado'}), 200
+
+    linhas = [f"{escape(chave)}: {escape(str(valor))}" for chave, valor in campos_relevantes(data)]
+    agora = datetime.now(ZoneInfo('America/Sao_Paulo')).strftime('%d/%m/%Y às %H:%M')
+    mensagem = "💰 <b>BOLETO PAGO NA LIA</b>\n\n" + "\n".join(linhas[:15]) + f"\n\n🕐 {agora}"
+    enviar_telegram(mensagem, TELEGRAM_CHAT_ID_LIA)
     return jsonify({'status': 'ok'}), 200
+
+
+PALAVRAS_RELEVANTES = ('name', 'nome', 'email', 'product', 'produto', 'amount', 'value', 'valor',
+                       'price', 'installment', 'parcela', 'number', 'paid', 'pago', 'due', 'status')
+
+
+def campos_relevantes(dado, prefixo=''):
+    if isinstance(dado, dict):
+        for chave, valor in dado.items():
+            yield from campos_relevantes(valor, f"{prefixo}{chave}.")
+    elif isinstance(dado, list):
+        for i, valor in enumerate(dado[:3]):
+            yield from campos_relevantes(valor, f"{prefixo}{i}.")
+    elif dado not in (None, '') and any(p in prefixo.lower() for p in PALAVRAS_RELEVANTES):
+        yield prefixo.rstrip('.'), dado
 
 
 @app.route('/', methods=['GET'])
