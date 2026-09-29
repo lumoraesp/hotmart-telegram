@@ -2,6 +2,7 @@ from flask import Flask, request, jsonify
 import requests
 import os
 from datetime import datetime
+from html import escape
 from zoneinfo import ZoneInfo
 
 
@@ -22,7 +23,12 @@ TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 TELEGRAM_CHAT_ID_PROBLEMAS = os.environ.get('TELEGRAM_CHAT_ID_PROBLEMAS')
 
-mensagens_enviadas = {}
+# Redis (Upstash) guarda o message_id de cada venda para apagar a mensagem se ela for cancelada.
+# Na Vercel cada requisição pode rodar num processo novo, então memória local não serve.
+# Sem essas variáveis o bot funciona normalmente, só não apaga a mensagem da venda cancelada.
+REDIS_URL = os.environ.get('KV_REST_API_URL') or os.environ.get('UPSTASH_REDIS_REST_URL')
+REDIS_TOKEN = os.environ.get('KV_REST_API_TOKEN') or os.environ.get('UPSTASH_REDIS_REST_TOKEN')
+REDIS_EXPIRA_SEGUNDOS = 120 * 24 * 3600  # cobre prazo de reembolso e de chargeback
 
 EVENTOS_APROVACAO = ['PURCHASE_APPROVED', 'PURCHASE_COMPLETE']
 EVENTOS_CANCELAMENTO = ['PURCHASE_CANCELED', 'PURCHASE_REFUNDED', 'PURCHASE_CHARGEBACK', 'PURCHASE_PROTEST', 'PURCHASE_EXPIRED']
@@ -38,7 +44,7 @@ LABELS_EVENTO = {
 
 @app.route('/webhook/hotmart', methods=['POST'])
 def hotmart_webhook():
-    data = request.json
+    data = request.get_json(silent=True)
     conta = request.args.get('conta', 'Hotmart')
 
     if not data:
@@ -55,60 +61,62 @@ def hotmart_webhook():
         compra = purchase_data.get('purchase', {})
         comprador = purchase_data.get('buyer', {})
 
-        nome_produto = produto.get('name', 'Produto')
+        nome_produto = escape(str(produto.get('name', 'Produto')))
         preco = compra.get('price', {})
         valor_total = preco.get('value', 0)
-        moeda = preco.get('currency_value', 'BRL')
-        transacao = compra.get('transaction', 'N/A')
-        nome_comprador = comprador.get('name', 'N/A')
-        email_comprador = comprador.get('email', 'N/A')
+        moeda = preco.get('currency_value') or 'BRL'
+        transacao = str(compra.get('transaction', 'N/A'))
+        nome_comprador = escape(str(comprador.get('name', 'N/A')))
+        email_comprador = escape(str(comprador.get('email', 'N/A')))
+        conta_html = escape(conta)
 
         valor_brl, cotacao = converter_para_brl(valor_total, moeda)
 
         if moeda.upper() != 'BRL':
             if valor_brl:
-                linha_valor = f"💰 *Valor:* {moeda} {valor_total:.2f} ≈ R$ {valor_brl:.2f}\n"
+                linha_valor = f"💰 <b>Valor:</b> {escape(moeda)} {valor_total:.2f} ≈ R$ {valor_brl:.2f}\n"
             else:
-                linha_valor = f"💰 *Valor:* {moeda} {valor_total:.2f}\n"
+                linha_valor = f"💰 <b>Valor:</b> {escape(moeda)} {valor_total:.2f}\n"
         else:
-            linha_valor = f"💰 *Valor:* R$ {valor_total:.2f}\n"
+            linha_valor = f"💰 <b>Valor:</b> R$ {valor_total:.2f}\n"
 
         comissao = compra.get('commission', {}).get('value', None)
-        linha_comissao = f"💵 *Minha parte:* R$ {comissao:.2f}\n" if comissao else ""
+        linha_comissao = f"💵 <b>Minha parte:</b> R$ {comissao:.2f}\n" if comissao else ""
 
         agora = datetime.now(ZoneInfo('America/Sao_Paulo')).strftime('%d/%m/%Y às %H:%M')
 
         if evento in EVENTOS_APROVACAO:
             mensagem = (
-                f"🎉 *NOVA VENDA NA HOTMART!*\n"
-                f"🏪 *Conta:* {conta}\n\n"
-                f"📦 *Produto:* {nome_produto}\n"
+                f"🎉 <b>NOVA VENDA NA HOTMART!</b>\n"
+                f"🏪 <b>Conta:</b> {conta_html}\n\n"
+                f"📦 <b>Produto:</b> {nome_produto}\n"
                 f"{linha_valor}"
                 f"{linha_comissao}"
-                f"👤 *Comprador:* {nome_comprador}\n"
-                f"📧 *Email:* {email_comprador}\n"
-                f"🔑 *Transação:* {transacao}\n"
-                f"🕐 *Data:* {agora}"
+                f"👤 <b>Comprador:</b> {nome_comprador}\n"
+                f"📧 <b>Email:</b> {email_comprador}\n"
+                f"🔑 <b>Transação:</b> {escape(transacao)}\n"
+                f"🕐 <b>Data:</b> {agora}"
             )
             message_id = enviar_telegram(mensagem, TELEGRAM_CHAT_ID)
             if message_id:
-                mensagens_enviadas[transacao] = message_id
+                redis_comando('SET', f'venda:{transacao}', message_id, 'EX', REDIS_EXPIRA_SEGUNDOS)
 
         elif evento in EVENTOS_CANCELAMENTO:
             emoji, label = LABELS_EVENTO.get(evento, ('❌', 'VENDA CANCELADA'))
 
-            if transacao in mensagens_enviadas:
-                deletar_mensagem(mensagens_enviadas.pop(transacao))
+            message_id = redis_comando('GETDEL', f'venda:{transacao}')
+            if message_id:
+                deletar_mensagem(message_id)
 
             mensagem = (
-                f"{emoji} *{label}*\n"
-                f"🏪 *Conta:* {conta}\n\n"
-                f"📦 *Produto:* {nome_produto}\n"
+                f"{emoji} <b>{label}</b>\n"
+                f"🏪 <b>Conta:</b> {conta_html}\n\n"
+                f"📦 <b>Produto:</b> {nome_produto}\n"
                 f"{linha_valor}"
-                f"👤 *Comprador:* {nome_comprador}\n"
-                f"📧 *Email:* {email_comprador}\n"
-                f"🔑 *Transação:* {transacao}\n"
-                f"🕐 *Data:* {agora}"
+                f"👤 <b>Comprador:</b> {nome_comprador}\n"
+                f"📧 <b>Email:</b> {email_comprador}\n"
+                f"🔑 <b>Transação:</b> {escape(transacao)}\n"
+                f"🕐 <b>Data:</b> {agora}"
             )
             enviar_telegram(mensagem, TELEGRAM_CHAT_ID_PROBLEMAS)
 
@@ -124,12 +132,13 @@ def enviar_telegram(mensagem, chat_id):
     payload = {
         'chat_id': chat_id,
         'text': mensagem,
-        'parse_mode': 'Markdown'
+        'parse_mode': 'HTML'
     }
     response = requests.post(url, json=payload, timeout=10)
     data = response.json()
     if data.get('ok'):
         return data['result']['message_id']
+    print(f"Telegram recusou a mensagem: {data.get('description')}")
     return None
 
 
@@ -137,9 +146,25 @@ def deletar_mensagem(message_id):
     url = f'https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteMessage'
     payload = {
         'chat_id': TELEGRAM_CHAT_ID,
-        'message_id': message_id
+        'message_id': int(message_id)
     }
     requests.post(url, json=payload, timeout=10)
+
+
+def redis_comando(*comando):
+    if not (REDIS_URL and REDIS_TOKEN):
+        return None
+    try:
+        resp = requests.post(
+            REDIS_URL,
+            headers={'Authorization': f'Bearer {REDIS_TOKEN}'},
+            json=[str(parte) for parte in comando],
+            timeout=5,
+        )
+        return resp.json().get('result')
+    except Exception as e:
+        print(f"Erro no Redis: {e}")
+        return None
 
 
 @app.route('/', methods=['GET'])
